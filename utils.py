@@ -11,8 +11,6 @@ from ogb.nodeproppred import PygNodePropPredDataset
 from scipy.linalg import fractional_matrix_power, inv
 from dgl import graph as dgl_graph
 from dgl.nn import APPNPConv
-from sklearn.manifold import TSNE
-import matplotlib.pyplot as plt
 from torch_geometric.utils import to_networkx
 
 def set_seed(seed):
@@ -36,7 +34,6 @@ def set_seed(seed):
 def merge_configs(cmd_args, yaml_args):
     for key, value in cmd_args.items():
         if value is not None:
-            # 处理嵌套参数（如 model.hidden_dim）
             keys = key.split('.')
             temp_yaml = yaml_args
             for k in keys[:-1]:
@@ -80,7 +77,7 @@ def load_data(data_name):
         graph, labels, dset_info = io.npz_data_to_pyg_graph(data)
     elif data_name in ['ogbn-arxiv']:
         data = PygNodePropPredDataset(name=data_name, root='data')
-        graph = data[0] # x为torch.float32类型
+        graph = data[0]
         labels = graph.y.long().squeeze(-1)
         class_idx, class_size = torch.unique(labels, return_counts=True)
         class_per = class_size.float() / labels.shape[0]
@@ -93,9 +90,6 @@ def load_data(data_name):
             'class_size': np.array(class_size),
             'class_per': np.array(class_per),
         }
-        # counts = torch.bincount(labels, minlength=data.num_classes)
-        # condition = (counts > graph.num_nodes * 0.03) & (counts < graph.num_nodes * 0.05)
-        # num_classes_in_range = condition.sum().item()
     elif data_name in ['ogbn-mag']:
         data = PygNodePropPredDataset(name=data_name, root='data')
         paper_x = data[0]['x_dict']['paper'] # x为torch.float32类型 [num_paper_nodes, feat_dim]data
@@ -116,7 +110,7 @@ def load_data(data_name):
             'class_size': np.array(class_size),
             'class_per': np.array(class_per),
         }
-    elif data_name in ['yelp', 'tfinance']:
+    elif data_name in ['tfinance', 'yelp']:
         graph = torch.load(f'data/{data_name}/{data_name}') #x为torch.float32类型
         labels = graph.y.long().squeeze(-1)
         class_idx, class_size = torch.unique(labels, return_counts=True)
@@ -168,7 +162,6 @@ def ad_split_num(labels, args, class_info):
     val_idx = np.hstack((normal_val, known_anomaly_val))
     train_idx = torch.LongTensor(train_idx)
     val_idx = torch.LongTensor(val_idx)
-    # min_size: photo: 331; computers: 291; cs: 118; ogbn-arxiv: 5000+; ogbn-mag: 200; yelp: 658; tfinance: 483
 
 
     test_idx = {
@@ -227,65 +220,20 @@ def compute_ppr(graph, dataname: str, alpha=0.2, self_loop=True):
         ppr_matrix = appnp(g.add_self_loop(), id).numpy()
     return ppr_matrix
 
-
-import torch
-import torch.nn.functional as F
-
-
-def mixup_by_similarity(z, graph, idx_train_anomaly):
-    # Step 1: L2 normalize every sample along feature dimension
-    z_norm = F.normalize(z, p=2, dim=1)  # shape: (N, D)
-
-    # Step 2: Compute similarity matrix H(z_i, z_j) = dot product of normalized features
-    sim_matrix = torch.matmul(z_norm, z_norm.T)  # shape: (N, N)
-
-    # Step 3: Apply softmax along dim=1 to get λ_ij for each z_i
-    lambda_weights = F.softmax(sim_matrix, dim=1)  # shape: (N, N)
-
-    # Step 4: constract the mixup graph
-    num_orig_nodes = graph.num_nodes
-    num_new_nodes = z.shape[0]
-    ori_feat = graph.x[idx_train_anomaly].to(z.device).detach()
-    z_mixup = torch.matmul(lambda_weights, ori_feat)
-    x_updated = torch.cat([graph.x.to(z.device), z_mixup], dim=0)
-
-    src_nodes = idx_train_anomaly  # shape: [50]
-    dst_nodes = torch.arange(num_orig_nodes, num_orig_nodes + num_new_nodes)
-    edge_src = torch.cat([src_nodes, dst_nodes])
-    edge_dst = torch.cat([dst_nodes, src_nodes])
-    new_edge_index = torch.stack([edge_src, edge_dst], dim=0)
-    edge_updated = torch.cat([graph.edge_index.to(z.device), new_edge_index.to(z.device)], dim=1)
-    graph_updated = Data(x = x_updated, edge_index = edge_updated)
-    return graph_updated, dst_nodes
-
-
 class NodeFeatureAugmentor:
     def __init__(self, augmentation_config):
-        """
-        参数说明：
-        augmentation_config: 增强配置字典，例如：
-            {
-                'noise': {'sigma': 0.05},
-                'mask': {'mask_prob': 0.3},
-                'mixup': {'alpha': 0.2},
-                'scaling': {'gamma': 0.1}
-            }
-        """
         self.config = augmentation_config
 
     def _standardize(self, x):
-        """标准化处理（自动检测是否已归一化）"""
         self.orig_mean = x.mean(dim=0, keepdim=True)
         self.orig_std = x.std(dim=0, keepdim=True) + 1e-8
 
-        # 判断是否已标准化（均值为0标准差为1）
         if torch.allclose(self.orig_mean, torch.zeros_like(self.orig_mean), atol=1e-3) and \
                 torch.allclose(self.orig_std, torch.ones_like(self.orig_std), atol=1e-2):
             return x.clone()
         return (x - self.orig_mean) / self.orig_std
 
     def _restore(self, x_normalized):
-        """恢复原始数据尺度"""
         return x_normalized * self.orig_std + self.orig_mean
 
     def _gaussian_noise(self, x, sigma=0.05):
@@ -306,11 +254,8 @@ class NodeFeatureAugmentor:
         return x * scale
 
     def augment(self, x):
-        """执行特征增强"""
-        # 标准化处理
         x_norm = self._standardize(x)
 
-        # 按配置顺序执行增强
         if 'noise' in self.config:
             x_norm = self._gaussian_noise(x_norm, **self.config['noise'])
 
@@ -323,62 +268,9 @@ class NodeFeatureAugmentor:
         if 'scaling' in self.config:
             x_norm = self._scaling_jitter(x_norm, **self.config['scaling'])
 
-        # 恢复原始数据分布
         return self._restore(x_norm)
 
-import numpy as np
-import matplotlib.pyplot as plt
-from matplotlib.colors import ListedColormap
-from sklearn.manifold import TSNE
 
-def tsne_vis_binary(features, labels, dataset_name):
-    # 转为 NumPy 格式
-    if isinstance(features, torch.Tensor):
-        features = features.detach().cpu().numpy()
-    if isinstance(labels, torch.Tensor):
-        labels = labels.detach().cpu().numpy()
-
-    # 设定最大每类样本数
-    max_per_class = 2000
-    selected_samples = []
-    selected_labels = []
-
-    for class_label in [0, 1]:  # 假设为二分类
-        indices = np.where(labels == class_label)[0]
-        sampled_indices = indices[:]
-        selected_samples.append(features[sampled_indices])
-        selected_labels.append(labels[sampled_indices])
-
-    selected_samples = np.vstack(selected_samples)
-    selected_labels = np.hstack(selected_labels)
-
-    # t-SNE 降维
-    tsne = TSNE(n_components=2, perplexity=30, random_state=42)
-    tsne_features = tsne.fit_transform(selected_samples)
-
-    # 可视化绘图
-    plt.figure(figsize=(10, 8))
-    colors = ['#59D898', '#557BE4']  # 绿色 / 蓝色
-    plt.scatter(
-        tsne_features[:, 0],
-        tsne_features[:, 1],
-        c=selected_labels,
-        cmap=ListedColormap(colors),
-        s=8,
-        alpha=0.6
-    )
-
-    # 去除坐标轴和网格
-    ax = plt.gca()
-    ax.set_xticks([])
-    ax.set_yticks([])
-    ax.grid(False)
-
-    # 保存图像
-    plt.tight_layout()
-    # plt.show()
-    plt.savefig(f"{dataset_name}_tsne_vis.svg", format='svg')
-    plt.close()
 
 
 

@@ -12,29 +12,20 @@ class DeviationLoss(torch.nn.Module):
         self.reduction = reduction
 
     def forward(self, y_pred, y_true):
-        """
-        y_pred: 模型输出的异常分数（未经过sigmoid）
-        y_true: 二进制标签（0:正常, 1:异常）
-        """
-        # 计算正常样本和异常样本的统计量
         normal_mask = (y_true == 0)
         abnormal_mask = (y_true == 1)
 
-        # 正常样本的均值和标准差
         normal_scores = y_pred[normal_mask]
         normal_mean = normal_scores.mean()
         normal_std = normal_scores.std()
 
-        # 异常样本的均值和标准差
         abnormal_scores = y_pred[abnormal_mask]
         abnormal_mean = abnormal_scores.mean()
         abnormal_std = abnormal_scores.std()
 
-        # 计算损失：最大化两类分布的差异
         loss = torch.abs((abnormal_mean - normal_mean) / (normal_std + 1e-8))
 
-        # 根据任务需求调整损失方向
-        loss = 1.0 / (loss + 1e-8)  # 鼓励增大两类差异
+        loss = 1.0 / (loss + 1e-8)
 
         if self.reduction == 'mean':
             return loss.mean()
@@ -49,35 +40,26 @@ def consistency_loss(logits, class_acc, p_cutoff):
     else:
         logits_weak = logits[0]
     pseudo_label = torch.sigmoid(logits_weak)
-    max_probs = pseudo_label.view(-1)  # 转为一维张量 (batch_size)
-    # max_idx表示得到的伪标签
-    max_idx = (max_probs >= 0.5).long()  # 根据概率判断类别（0或1）
+    max_probs = pseudo_label.view(-1)
+    max_idx = (max_probs >= 0.5).long()
     print(f'max_probs: {torch.max(max_probs)}， num of >0.5: {torch.sum(max_idx == 1)}')
 
-    # mask就是根据不同类别的概率来选择样本，也就是说之前是固定阈值进行操作，而现在则是不同类别拥有一个动态适应的概率值来选择样本
-    # 下面的操作中，max_probs和max_idx是一一对应的，而max_idx则表示样本属于哪一类，class_acc[max_idx]表示max_idx的占比，
-    # 该类别被选中的样本越多，则概率越大
-    # 对于abnormal的probs，我们希望越大越好，但是对于normal的probs，我们希望越小越好，所以分成两个部分进行选择mask，最终进行结合
-    # 得到的mask用于损失计算，select用于选择样本
     threshold = p_cutoff[max_idx] * (class_acc[max_idx] / (2. - class_acc[max_idx]))
     ge_mask = (max_idx == 1)
     le_mask = (max_idx == 0)
-    threshold[le_mask] = 2 * p_cutoff[0] - threshold[le_mask] # 对于le而言，阈值应该取反
+    threshold[le_mask] = 2 * p_cutoff[0] - threshold[le_mask]
     mask = torch.zeros_like(max_probs)
     mask[ge_mask] = max_probs[ge_mask].ge(threshold[ge_mask]).float()
     mask[le_mask] = max_probs[le_mask].le(threshold[le_mask]).float()
 
-    # 选择max_probs符合条件的样本，这里是预测值，必须是0.5以上才算异常
     abnormal_probs = max_probs[max_probs >= 0.5]
     normal_probs = max_probs[max_probs < 0.5]
-    # 如果存在正/异常样本，则计算置信度分位数，作为置信度阈值，否则默认,abnormal_probs.abnormal_probs.quantile从小到大排序
     abnormal_cutoff = abnormal_probs.quantile(0.95) if len(abnormal_probs) > 0 else p_cutoff[0]
     normal_cutoff = normal_probs.quantile(0.05) if len(normal_probs) > 0 else p_cutoff[1]
     select = ((max_probs >= abnormal_cutoff) | (max_probs <= normal_cutoff)).long()
 
     criterion = torch.nn.BCEWithLogitsLoss(reduction='none')
-    target = max_idx.float()  # 类别标签转换为浮点数（0或1）
-    # logits_strong (batch_size, 1)，需要squeeze成 (batch_size)
+    target = max_idx.float()
     if len(logits) == 2:
         loss = criterion(logits_strong.squeeze(), target)
     else:
@@ -162,7 +144,7 @@ def compute_beta(model, train_indices, val_indices, graph, labels, dataloader, d
                                       pin_memory=True)
     # Compute validation influence
     influences = []
-    for i, (batch_size, n_id, adjs) in enumerate(tqdm(single_dataloader)):  # 遍历训练集, 每个batch是单个训练样本
+    for i, (batch_size, n_id, adjs) in enumerate(tqdm(single_dataloader)):
         single_sample = graph.x[n_id].to(device)
         single_adjs = [adj.to(device) for adj in adjs]
         single_logits = model(single_sample, single_adjs)
@@ -183,52 +165,6 @@ def compute_beta(model, train_indices, val_indices, graph, labels, dataloader, d
     return normed_influences.to(device)
 
 def anomaly_mixup(args, model, graph, idx_train_anomaly, ppr_matrix=None):
-    model.train()
-    b_xent = nn.CrossEntropyLoss()
-    sample_size_for_anormaly = int(args.sample_size_for_anormaly)
-    selected_idx = np.random.choice(idx_train_anomaly, sample_size_for_anormaly, replace=False)
-    selected_idx_tensor = torch.from_numpy(selected_idx)
-    anomaly_tainloader = NeighborSampler(graph.edge_index,
-                                         node_idx=selected_idx_tensor,
-                                         sizes=args.sampling_sizes,
-                                         batch_size=len(selected_idx),
-                                         shuffle=False,
-                                         drop_last=False,
-                                         pin_memory=True)
-    for i, (batch_size, n_id, adjs) in enumerate(anomaly_tainloader):
-        x = graph.x[n_id].to(args.device)
-        adjs = [adj.to(args.device) for adj in adjs]
-        sub_ppr_matrix = torch.from_numpy(ppr_matrix[np.ix_(n_id.cpu().numpy(),  n_id.cpu().numpy())]).float().to(args.device)
-        logits, div_loss = model(x, adjs, sub_ppr_matrix)
-        logits1 = logits
-        logits2 = logits.T.contiguous()
-        new_label = torch.arange(logits.size(0)).long().cuda()
-        loss = b_xent(logits1, new_label) / 2 + b_xent(logits2, new_label) / 2 - args.div_loss_alpha * div_loss
-        return loss
-
-
-def anomaly_mixup_v2(args, model, graph, idx_train_anomaly, ppr_matrix=None):
-    model.train()
-    b_xent = nn.CrossEntropyLoss()
-    # sample_size_for_anormaly = int(args.sample_size_for_anormaly)
-    # selected_idx = np.random.choice(idx_train_anomaly, sample_size_for_anormaly, replace=False)
-    # selected_idx_tensor = torch.from_numpy(selected_idx)
-    anomaly_tainloader = NeighborSampler(graph.edge_index,
-                                         node_idx=idx_train_anomaly,
-                                         sizes=args.sampling_sizes,
-                                         batch_size=len(idx_train_anomaly),
-                                         shuffle=False,
-                                         drop_last=False,
-                                         pin_memory=True,
-                                         num_workers=8)
-    for i, (batch_size, n_id, adjs) in enumerate(anomaly_tainloader):
-        x = graph.x[n_id].to(args.device)
-        adjs = [adj.to(args.device) for adj in adjs]
-        sub_ppr_matrix = torch.from_numpy(ppr_matrix[np.ix_(n_id.cpu().numpy(),  n_id.cpu().numpy())]).float().to(args.device)
-        embeds, div_loss = model(x, adjs, sub_ppr_matrix)
-    return embeds, div_loss
-
-def anomaly_mixup_v3(args, model, graph, idx_train_anomaly, ppr_matrix=None):
     model.train()
     loss_type = args.mixup_loss_type
     if loss_type == 'consistency':

@@ -14,11 +14,6 @@ def load_npz(fp):
     return data
 
 
-# def load_dgl_graph(dset_name, homo=1, view=None):
-#     graph = DglDataset(dset_name, homo=homo, view=view).graph
-#     x_all, adj = graph.ndata['feature'], graph.adj().to_dense()
-#     return x_all, adj
-
 
 def make_pyg_graph_dgl(x, adj, undirected=True):
     edge_index = dense_to_sparse(adj)[0]

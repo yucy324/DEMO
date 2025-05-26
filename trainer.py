@@ -2,10 +2,9 @@ import torch
 import numpy as np
 
 from model.base_gnns import train_model
-from model.base_nns import MLP
-from losses.loss import DeviationLoss, compute_beta, anomaly_mixup, consistency_loss, anomaly_mixup_v2, anomaly_mixup_v3
+from losses.loss import DeviationLoss, compute_beta, consistency_loss, anomaly_mixup
 from torch_geometric.loader import NeighborSampler
-from utils import get_optimiser, NodeFeatureAugmentor, tsne_vis_binary
+from utils import get_optimiser, NodeFeatureAugmentor
 from collections import Counter
 from copy import deepcopy
 from sklearn.metrics import roc_auc_score, average_precision_score
@@ -80,10 +79,7 @@ def train(split_info, labels, graph, args, anomaly_info, logger, ppr_matrix=None
     aupr_test_unknown_best = 0.0
     embedds_best = None
     max_counter = {i: 0 for i in [0, 1]}
-    # rest_labels_copy = deepcopy(rest_labels)
-    # idx_train_copy = deepcopy(idx_train)
-    # graph_copy = deepcopy(graph)
-    # torch.autograd.set_detect_anomaly(True)
+
     for epoch in range(args.num_epochs):
         model.train()
         logits_labeled = None
@@ -103,13 +99,7 @@ def train(split_info, labels, graph, args, anomaly_info, logger, ppr_matrix=None
         # mixup for the anomaly samples
         mixup_loss = 0.0
         if args.mixup:
-            mixup_loss = anomaly_mixup_v3(args, model, graph, idx_train_anomaly, ppr_matrix)
-            # embeds = embeds.detach()
-            # updata_graph, new_nodes = mixup_by_similarity(embeds, graph_copy, idx_train_anomaly)
-            # new_labels = torch.ones(embeds.size(0), dtype=rest_labels.dtype, device=device)
-            # rest_labels = torch.cat((rest_labels_copy, new_labels), dim=0)
-            # idx_train = torch.cat((idx_train_copy, new_nodes), dim=0)
-            # graph = updata_graph
+            mixup_loss = anomaly_mixup(args, model, graph, idx_train_anomaly, ppr_matrix)
             loss = labeled_loss + args.mixup_loss * mixup_loss
 
         unnlabeled_loss = 0.0
@@ -120,8 +110,6 @@ def train(split_info, labels, graph, args, anomaly_info, logger, ppr_matrix=None
             if max(pseudo_counter.values()) < graph.num_nodes:
                 if args.thresh_warmup:
                     for i in range(args.num_classes):
-                        # 以下实现区别于Flexmatch，首先无论某一类中的数据量是多少，都可以从0到1，另外，当数据量比较大的时候，得到的classwise_acc就是1
-                        # 相当于提高阈值，增加样本可信度，但是当数据量减少了，降低阈值，保持样本接受率
                         max_counter[i] = max(max_counter[i], pseudo_counter[i])
                         if max_counter[i] == 0:
                             classwise_acc[i] = 0.0
@@ -167,11 +155,9 @@ def train(split_info, labels, graph, args, anomaly_info, logger, ppr_matrix=None
                     selected_label[unlabeled_idx[select == 1]] = pseudo_labels[select == 1]
             loss = labeled_loss + args.unlabeled_loss * unnlabeled_loss + args.mixup_loss * mixup_loss
 
-
         # computer energy loss
         energy_loss = 0.0
         if args.energy_loss:
-            # beta = compute_beta(model, idx_train_copy, idx_val, graph_copy, rest_labels_copy, dataloader, device, args)
             beta = compute_beta(model, idx_train, idx_val, graph, rest_labels, dataloader, device, args)
             energy = model.energy(logits_labeled)
             energy_loss = torch.mean(beta * energy)
@@ -189,15 +175,8 @@ def train(split_info, labels, graph, args, anomaly_info, logger, ppr_matrix=None
             auroc_test_all_best, aupr_test_all_best, auroc_test_unknown_best, aupr_test_unknown_best, embedds_best = (
                 eval(model, split_info, rest_labels, graph, args, device, auroc_test_all_best, aupr_test_all_best, auroc_test_unknown_best, aupr_test_unknown_best, embedds_best))
             print(f"Epoch: {epoch}, Best AUROC test all: {auroc_test_all_best}, AUPR test all: {aupr_test_all_best}, AUROC test unknown: {auroc_test_unknown_best}, AUPR test unknown: {aupr_test_unknown_best}")
-            # print(f"Epoch: {epoch}, loss: {loss}, labeled_loss: {labeled_loss}, unnlabeled_loss: {unnlabeled_loss}, mixup_loss: {mixup_loss}, energy_loss: {energy_loss}")
             logger.info(f"Epoch: {epoch}, loss: {loss}, labeled_loss: {labeled_loss}, unnlabeled_loss: {unnlabeled_loss}, mixup_loss: {mixup_loss}, energy_loss: {energy_loss}")
             logger.info(f"Best AUROC test all: {auroc_test_all_best}, AUPR test all: {aupr_test_all_best}, AUROC test unknown: {auroc_test_unknown_best}, AUPR test unknown: {aupr_test_unknown_best}")
-
-    # visiualize the embedding
-    idx_test_all = split_info['idx_test']['all']
-    y_true = rest_labels.cpu().numpy()[idx_test_all]
-    embeds_best = embedds_best.cpu().numpy()[idx_test_all]
-    tsne_vis_binary(embeds_best, y_true, args.dataname)
 
 
 def eval(model, split_info, labels, graph, args, device, auroc_test_all_best, aupr_test_all_best, auroc_test_unknown_best, aupr_test_unknown_best, embedds_best):

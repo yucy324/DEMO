@@ -1,15 +1,10 @@
 import argparse, logging
-import torch
-import numpy as np
-import dgl
 import yaml, time
 from utils import *
 from trainer import train
-from dgl.data.utils import save_graphs, load_graphs
 from addict import Dict
 
-
-def main(unlabeled_loss, mixup_loss, energy_loss):
+def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--dataname", type=str, default='computers',
                         choices=['photo', 'computers', 'cs', 'yelp', 'ogbn-arxiv', 'ogbn-mag', 'tfinance'])
@@ -23,7 +18,7 @@ def main(unlabeled_loss, mixup_loss, energy_loss):
 
     parser.add_argument("--used_unlabeled_data", type=bool, default=True)
     parser.add_argument("--energy_loss", type=bool, default=True)
-    parser.add_argument("--mixup", type=bool, default=True)
+    parser.add_argument("--mixup", type=bool, default=False)
 
     parser.add_argument("--batch_size_for_anormaly", type=int, default=20)
     parser.add_argument("--sample_size_for_anormaly", type=int, default=25)
@@ -33,16 +28,10 @@ def main(unlabeled_loss, mixup_loss, energy_loss):
 
 
     parser.add_argument("--div_loss_alpha", type=float, default=0.5)
-    # 各类损失的权重
-    parser.add_argument("--unlabeled_loss", type=float, default=0.3)
-    parser.add_argument("--mixup_loss", type=float, default=0.1)
     parser.add_argument("--mixup_loss_type", type=str, default='consistency', choices=['consistency', 'contrastive'])
-    parser.add_argument("--energy_loss_weight", type=float, default=0.1)
+
 
     args = parser.parse_args()
-    args.unlabeled_loss = unlabeled_loss
-    args.mixup_loss = mixup_loss
-    args.energy_loss_weight = energy_loss
     if args.sample_size_for_anormaly > args.train_anormaly_num:
         args.sample_size_for_anormaly = args.train_anormaly_num
     set_seed(args.seed)
@@ -86,31 +75,10 @@ def main(unlabeled_loss, mixup_loss, energy_loss):
                         'all_anomaly': anomaly_class_idx}
         split_info = ad_split_num(labels, args, anomaly_info)
         train(split_info, labels, graph, args, anomaly_info, logger, ppr_matrix)
-        break
-
-
-        # 保存训练、验证和测试集的节点索引
-        # 标签改成0与1，并将graph转化为dgl格式
-        # np.savetxt(f"baseline_data/{args.dataname}_{args.train_anormaly_num}_train.txt", np.array(split_info['idx_train']).astype(int), fmt='%d')
-        # np.savetxt(f"baseline_data/{args.dataname}_{args.train_anormaly_num}_val.txt", np.array(split_info['idx_val']).astype(int), fmt='%d')
-        # np.savetxt(f"baseline_data/{args.dataname}_{args.train_anormaly_num}_test_all.txt", split_info['idx_test']['all'].astype(int), fmt='%d')
-        # np.savetxt(f"baseline_data/{args.dataname}_{args.train_anormaly_num}_test_unknown.txt", split_info['idx_test']['unknown'].astype(int), fmt='%d')
-
-        # rest_labels = np.zeros(shape=labels.shape[0])
-        # for i in anomaly_info['all_anomaly']:
-        #     rest_labels[np.where(labels == i)[0]] = 1
-        # rest_labels = torch.from_numpy(rest_labels).long()
-        # src, dst = graph.edge_index
-        # g = dgl.graph((src, dst), num_nodes=graph.num_nodes)
-        # g.ndata['feat'] = graph.x
-        # g.ndata['label'] = rest_labels
-        # save_graphs(f"baseline_data/{args.dataname}.bin", g)
-        # print(f'{args.dataname}_{args.train_anormaly_num} done')
 
 
 
 
 
 if __name__ == '__main__':
-    main(0.3, 0.1, 0.1)
-    # main(0.3, 0.1, 0.3)
+    main()
